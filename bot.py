@@ -9,6 +9,8 @@ from collections import defaultdict, deque
 import telebot
 from telebot.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
 import io
+import requests
+import time
 
 # Создаем Flask сервер для Render
 app = Flask(__name__)
@@ -22,6 +24,19 @@ def run_web():
 
 # Запускаем веб-сервер в отдельном потоке
 threading.Thread(target=run_web, daemon=True).start()
+
+# 🔥 АВТОПИНГ ДЛЯ RENDER - БОТ НЕ УСНЕТ
+def keep_awake():
+    while True:
+        time.sleep(240)  # 4 минуты
+        try:
+            requests.get('https://codecasinoalla-1.onrender.com/')
+            print("🔄 Автопинг - бот активен")
+        except Exception as e:
+            print(f"❌ Ошибка автопинга: {e}")
+
+# Запускаем автопинг в отдельном потоке
+threading.Thread(target=keep_awake, daemon=True).start()
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
