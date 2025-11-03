@@ -1,5 +1,14 @@
 from flask import Flask
 import threading
+import logging
+import re
+import sqlite3
+import json
+from datetime import datetime, timedelta
+from collections import defaultdict, deque
+import telebot
+from telebot.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
+import io
 
 # Создаем Flask сервер для Render
 app = Flask(__name__)
@@ -13,16 +22,6 @@ def run_web():
 
 # Запускаем веб-сервер в отдельном потоке
 threading.Thread(target=run_web, daemon=True).start()
-
-import logging
-import re
-import sqlite3
-import json
-from datetime import datetime, timedelta
-from collections import defaultdict, deque
-import telebot
-from telebot.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
-import io
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -196,6 +195,15 @@ class Database:
         conn.close()
         return restriction
 
+    def find_user_by_username(self, username):
+        """Находит пользователя по юзернейму"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM users WHERE username = ?', (username,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+
 # Инициализация БД
 db = Database()
 
@@ -205,6 +213,9 @@ def format_end_time(end_time):
         return "Никогда 🔒"
     else:
         if isinstance(end_time, str):
+            # Убираем микросекунды если есть
+            if '.' in end_time:
+                end_time = end_time.split('.')[0]
             end_time = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
         return end_time.strftime("%d.%m.%Y %H:%M") + " ⏰"
 
@@ -330,23 +341,41 @@ def user_log_command(message):
         return
     
     try:
-        # Получаем ID из команды: /log 123456
+        # Получаем параметр из команды: /log 123456 или /log @username
         parts = message.text.split()
         if len(parts) < 2:
-            bot.reply_to(message, "❌ Используй: /log ID_пользователя")
+            bot.reply_to(message, "❌ Используй: /log ID_пользователя или /log @username")
             return
         
-        user_id = parts[1]
+        search_param = parts[1]
+        
+        # Определяем, это ID или юзернейм
+        user_id = None
+        if search_param.startswith('@'):
+            # Поиск по юзернейму
+            username = search_param[1:]  # Убираем @
+            user_id = db.find_user_by_username(username)
+            if not user_id:
+                bot.reply_to(message, f"🔍 Пользователь @{username} не найден в базе")
+                return
+        else:
+            # Поиск по ID
+            try:
+                user_id = int(search_param)
+            except ValueError:
+                bot.reply_to(message, "❌ Неверный формат. Используй: /log 123456 или /log @username")
+                return
         
         # Получаем все ограничения пользователя
         restrictions = db.get_user_restrictions(user_id, message.chat.id)
         
         if not restrictions:
-            bot.reply_to(message, f"🔍 Пользователь {user_id} не найден в базе нарушений")
+            bot.reply_to(message, f"🔍 Пользователь {search_param} не найден в базе нарушений")
             return
         
         # Формируем подробный лог
-        log_text = f"📋 ЛОГ НАРУШЕНИЙ ПОЛЬЗОВАТЕЛЯ: {user_id}\n"
+        log_text = f"📋 ЛОГ НАРУШЕНИЙ ПОЛЬЗОВАТЕЛЯ: {search_param}\n"
+        log_text += f"👤 ID пользователя: {user_id}\n"
         log_text += f"📅 Сформирован: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n"
         log_text += f"📊 Всего нарушений: {len(restrictions)}\n\n"
         log_text += "=" * 50 + "\n\n"
@@ -358,15 +387,21 @@ def user_log_command(message):
             log_text += f"📝 Причина: {restriction[4]}\n"
             log_text += f"⏱️ Длительность: {restriction[5]} часов\n"
             
-            # Исправляем обработку времени
+            # Исправляем обработку времени с микросекундами
             start_time = restriction[6]
             if isinstance(start_time, str):
+                # Убираем микросекунды если есть
+                if '.' in start_time:
+                    start_time = start_time.split('.')[0]
                 start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
             log_text += f"🕐 Начало: {start_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
             
             end_time = restriction[7]
             if end_time:
                 if isinstance(end_time, str):
+                    # Убираем микросекунды если есть
+                    if '.' in end_time:
+                        end_time = end_time.split('.')[0]
                     end_time = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
                 log_text += f"🕒 Конец: {end_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
                 # Проверяем активно ли еще ограничение
@@ -386,16 +421,21 @@ def user_log_command(message):
         
         # Создаем файл в памяти
         file = io.BytesIO(log_text.encode('utf-8'))
-        file.name = f'user_{user_id}_log.txt'
+        
+        # Определяем имя файла
+        if search_param.startswith('@'):
+            file.name = f'user_{search_param[1:]}_log.txt'
+        else:
+            file.name = f'user_{search_param}_log.txt'
         
         # Отправляем файл
         bot.send_document(
             message.chat.id, 
             file, 
-            caption=f"📄 Лог нарушений пользователя {user_id}\n📊 Нарушений: {len(restrictions)}"
+            caption=f"📄 Лог нарушений пользователя {search_param}\n📊 Нарушений: {len(restrictions)}"
         )
         
-        logger.info(f"Админ {message.from_user.id} запросил лог пользователя {user_id}")
+        logger.info(f"Админ {message.from_user.id} запросил лог пользователя {search_param}")
             
     except Exception as e:
         error_msg = f"❌ Ошибка при получении лога: {e}"
@@ -670,6 +710,6 @@ if __name__ == '__main__':
     print("🔧 Токен: 8207041880:AAEM1F0YaWF3jEKJ-GfRPPOosOBbpTnSY4M")
     print("👑 Админ ID: 8054980148")
     print("🛠️ Админ-панель: /admin")
-    print("📄 Команда /log ID - получить лог нарушений пользователя")
+    print("📄 Команда /log ID/@username - получить лог нарушений пользователя")
     print("🔍 Команда /check работает!")
     bot.infinity_polling()
