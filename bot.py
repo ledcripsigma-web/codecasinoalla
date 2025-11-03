@@ -1,3 +1,24 @@
+from flask import Flask
+import threading
+
+# Создаем веб-сервер для Render
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+# Запускаем Flask в отдельном потоке
+def run_web():
+    app.run(host='0.0.0.0', port=10000, debug=False)
+
+threading.Thread(target=run_web, daemon=True).start()
+
+# ТВОЙ ОСНОВНОЙ КОД БОТА НИЖЕ
+# import telebot
+# bot = telebot.TeleBot("токен")
+# и т.д...
+
 import logging
 import re
 import sqlite3
