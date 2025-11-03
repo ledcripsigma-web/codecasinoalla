@@ -269,7 +269,7 @@ def check_banned_phrases(message_text):
     
     return None, None
 
-def punish_user(user_id, chat_id, user_name, reason, duration, admin_name="Система"):
+def punish_user(user_id, chat_id, user_name, reason, duration, admin_name="Система", message_text=""):
     """Наказывает пользователя"""
     try:
         until_date = datetime.now() + timedelta(seconds=duration) if duration > 0 else None
@@ -284,7 +284,7 @@ def punish_user(user_id, chat_id, user_name, reason, duration, admin_name="Си�
         # Добавляем в БД
         db.add_restriction(
             user_id, chat_id, 'mute', reason, 
-            duration // 3600 if duration > 0 else 0, ADMIN_ID, "Авто-модерация", 
+            duration // 3600 if duration > 0 else 0, ADMIN_ID, message_text, 
             deque()
         )
         
@@ -544,7 +544,7 @@ def process_mute_final(message):
         
         # ВЫПОЛНЯЕМ РЕАЛЬНЫЙ МУТ
         duration = hours * 3600 if hours > 0 else 0
-        success = punish_user(user_id, chat_id, user_name, reason, duration, message.from_user.first_name)
+        success = punish_user(user_id, chat_id, user_name, reason, duration, message.from_user.first_name, message_text=reason)
         
         if success:
             bot.reply_to(message, f"✅ Пользователь {user_name} замьючен в чате {chat_id}")
@@ -676,13 +676,13 @@ def handle_text(message):
     # Проверка на запрещенные фразы
     reason, duration = check_banned_phrases(message_text)
     if reason:
-        punish_user(user_id, chat_id, message.from_user.first_name, reason, duration)
+        punish_user(user_id, chat_id, message.from_user.first_name, reason, duration, message_text=message_text)
         bot.delete_message(chat_id, message.message_id)
         return
     
     # Проверка на идентичные сообщения
     if check_consecutive_identical(user_id, message_text):
-        punish_user(user_id, chat_id, message.from_user.first_name, "спам (5 одинаковых сообщений подряд)", SPAM_MUTE_DURATION)
+        punish_user(user_id, chat_id, message.from_user.first_name, "спам (5 одинаковых сообщений подряд)", SPAM_MUTE_DURATION, message_text=message_text)
         bot.delete_message(chat_id, message.message_id)
         return
     
@@ -700,7 +700,7 @@ def handle_sticker(message):
     db.add_message_to_history(user_id, chat_id, sticker_file_id, 'sticker')
     
     if check_consecutive_stickers(user_id, sticker_file_id):
-        punish_user(user_id, chat_id, message.from_user.first_name, "спам стикерами (5 подряд)", SPAM_MUTE_DURATION)
+        punish_user(user_id, chat_id, message.from_user.first_name, "спам стикерами (5 подряд)", SPAM_MUTE_DURATION, message_text="[СТИКЕР]")
         bot.delete_message(chat_id, message.message_id)
 
 # Запуск бота
