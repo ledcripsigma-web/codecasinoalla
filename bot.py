@@ -17,8 +17,6 @@ threading.Thread(target=run_web, daemon=True).start()
 # ТВОЙ ОСНОВНОЙ КОД БОТА НИЖЕ
 # import telebot
 # bot = telebot.TeleBot("токен")
-# и т.д...
-
 import logging
 import re
 import sqlite3
@@ -27,6 +25,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 import telebot
 from telebot.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
+import io  # Добавил для работы с файлами
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -323,6 +322,79 @@ def unmute_user(user_id, chat_id, user_name, admin_name="Система"):
         return False
     return True
 
+# КОМАНДА /log ДЛЯ ПОЛУЧЕНИЯ ЛОГОВ ПОЛЬЗОВАТЕЛЯ
+@bot.message_handler(commands=['log'])
+def user_log_command(message):
+    """Команда /log для получения логов пользователя"""
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, "❌ Доступ запрещен!")
+        return
+    
+    try:
+        # Получаем ID из команды: /log 123456
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "❌ Используй: /log ID_пользователя")
+            return
+        
+        user_id = parts[1]
+        
+        # Получаем все ограничения пользователя
+        restrictions = db.get_user_restrictions(user_id, message.chat.id)
+        
+        if not restrictions:
+            bot.reply_to(message, f"🔍 Пользователь {user_id} не найден в базе нарушений")
+            return
+        
+        # Формируем подробный лог
+        log_text = f"📋 ЛОГ НАРУШЕНИЙ ПОЛЬЗОВАТЕЛЯ: {user_id}\n"
+        log_text += f"📅 Сформирован: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n"
+        log_text += f"📊 Всего нарушений: {len(restrictions)}\n\n"
+        log_text += "=" * 50 + "\n\n"
+        
+        for i, restriction in enumerate(restrictions, 1):
+            log_text += f"🚨 НАРУШЕНИЕ #{i}\n"
+            log_text += f"👤 ID пользователя: {restriction[1]}\n"
+            log_text += f"💬 Тип: {restriction[3]}\n"
+            log_text += f"📝 Причина: {restriction[4]}\n"
+            log_text += f"⏱️ Длительность: {restriction[5]} часов\n"
+            log_text += f"🕐 Начало: {restriction[6].strftime('%d.%m.%Y %H:%M:%S')}\n"
+            
+            if restriction[7]:  # end_time
+                log_text += f"🕒 Конец: {restriction[7].strftime('%d.%m.%Y %H:%M:%S')}\n"
+                # Проверяем активно ли еще ограничение
+                if restriction[7] > datetime.now():
+                    log_text += f"📊 Статус: 🔴 АКТИВНО\n"
+                else:
+                    log_text += f"📊 Статус: 🟢 ЗАВЕРШЕНО\n"
+            else:
+                log_text += f"🕒 Конец: НИКОГДА\n"
+                log_text += f"📊 Статус: 🔴 АКТИВНО\n"
+            
+            log_text += f"👮 Админ ID: {restriction[8]}\n"
+            if restriction[9]:  # message_text
+                log_text += f"💭 Сообщение: {restriction[9][:100]}...\n"
+            
+            log_text += "─" * 40 + "\n\n"
+        
+        # Создаем файл в памяти
+        file = io.BytesIO(log_text.encode('utf-8'))
+        file.name = f'user_{user_id}_log.txt'
+        
+        # Отправляем файл
+        bot.send_document(
+            message.chat.id, 
+            file, 
+            caption=f"📄 Лог нарушений пользователя {user_id}\n📊 Нарушений: {len(restrictions)}"
+        )
+        
+        logger.info(f"Админ {message.from_user.id} запросил лог пользователя {user_id}")
+            
+    except Exception as e:
+        error_msg = f"❌ Ошибка при получении лога: {e}"
+        bot.reply_to(message, error_msg)
+        logger.error(error_msg)
+
 # АДМИН ПАНЕЛЬ
 def admin_panel_keyboard():
     """Клавиатура админ-панели"""
@@ -579,5 +651,6 @@ if __name__ == '__main__':
     print("🔧 Токен: 8207041880:AAEM1F0YaWF3jEKJ-GfRPPOosOBbpTnSY4M")
     print("👑 Админ ID: 8054980148")
     print("🛠️ Админ-панель: /admin")
+    print("📄 Команда /log ID - получить лог нарушений пользователя")
     print("🔍 Команда /check работает!")
     bot.infinity_polling()
