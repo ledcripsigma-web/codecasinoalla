@@ -17,7 +17,8 @@ threading.Thread(target=run_web, daemon=True).start()
 # ТВОЙ ОСНОВНОЙ КОД БОТА НИЖЕ
 # import telebot
 # bot = telebot.TeleBot("токен")
-import logging
+                    
+    import logging
 import re
 import sqlite3
 import json
@@ -25,7 +26,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 import telebot
 from telebot.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
-import io  # Добавил для работы с файлами
+import io
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -207,6 +208,8 @@ def format_end_time(end_time):
     if end_time is None:
         return "Никогда 🔒"
     else:
+        if isinstance(end_time, str):
+            end_time = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
         return end_time.strftime("%d.%m.%Y %H:%M") + " ⏰"
 
 def is_admin(user_id):
@@ -358,12 +361,20 @@ def user_log_command(message):
             log_text += f"💬 Тип: {restriction[3]}\n"
             log_text += f"📝 Причина: {restriction[4]}\n"
             log_text += f"⏱️ Длительность: {restriction[5]} часов\n"
-            log_text += f"🕐 Начало: {restriction[6].strftime('%d.%m.%Y %H:%M:%S')}\n"
             
-            if restriction[7]:  # end_time
-                log_text += f"🕒 Конец: {restriction[7].strftime('%d.%m.%Y %H:%M:%S')}\n"
+            # Исправляем обработку времени
+            start_time = restriction[6]
+            if isinstance(start_time, str):
+                start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
+            log_text += f"🕐 Начало: {start_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
+            
+            end_time = restriction[7]
+            if end_time:
+                if isinstance(end_time, str):
+                    end_time = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
+                log_text += f"🕒 Конец: {end_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
                 # Проверяем активно ли еще ограничение
-                if restriction[7] > datetime.now():
+                if end_time > datetime.now():
                     log_text += f"📊 Статус: 🔴 АКТИВНО\n"
                 else:
                     log_text += f"📊 Статус: 🟢 ЗАВЕРШЕНО\n"
@@ -576,9 +587,15 @@ def check_command(message):
         
         if active_restriction:
             end_time = format_end_time(active_restriction[7])
+            
+            # Исправляем обработку start_time
+            start_time = active_restriction[6]
+            if isinstance(start_time, str):
+                start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
+            
             response += f"📊 Статус: 🔇 Замучен\n"
             response += f"📝 Причина: {active_restriction[4]}\n"
-            response += f"⏰ Начало: {active_restriction[6].strftime('%d.%m.%Y %H:%M')}\n"
+            response += f"⏰ Начало: {start_time.strftime('%d.%m.%Y %H:%M')}\n"
             response += f"🕒 Конец: {end_time}\n"
         else:
             response += f"📊 Статус: ✅ Активен\n"
@@ -590,7 +607,13 @@ def check_command(message):
             response += f"\n📜 Последние нарушения:\n"
             for i, restriction in enumerate(restrictions[:3], 1):
                 end_time = format_end_time(restriction[7])
-                response += f"{i}. {restriction[4]} - {restriction[6].strftime('%d.%m.%Y %H:%M')}\n"
+                
+                # Исправляем обработку start_time
+                start_time = restriction[6]
+                if isinstance(start_time, str):
+                    start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
+                
+                response += f"{i}. {restriction[4]} - {start_time.strftime('%d.%m.%Y %H:%M')}\n"
         
         bot.reply_to(message, response)
         
