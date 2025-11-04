@@ -1,6 +1,6 @@
 from flask import Flask
 import threading
-imdef check_consecutive_identical(user_id, message_text):port logging
+import logging
 import re
 import sqlite3
 import json
@@ -344,26 +344,44 @@ def is_admin(user_id):
     """Проверка, является ли пользователь администратором"""
     return user_id == ADMIN_ID
 
-   def check_consecutive_identical(user_id, message_text):
-    """Проверяет одинаковые сообщения"""
+def check_consecutive_identical(user_id, message_text):
+    """Проверяет одинаковые сообщения подряд"""
     history = user_message_history[user_id]
     
-    # Добавляем текущее сообщение в историю
+    # Добавляем текущее сообщение
     history.append(message_text)
     
     # Проверяем только если в истории достаточно сообщений
     if len(history) < MAX_CONSECUTIVE_IDENTICAL:
         return False
     
-    # Берем последние 5 сообщений
+    # Проверяем, что все последние 5 сообщений одинаковые
     last_messages = list(history)[-MAX_CONSECUTIVE_IDENTICAL:]
+    first_msg = last_messages[0]
     
-    # Проверяем, что все 5 сообщений одинаковые
-    first_message = last_messages[0]
-    if all(msg == first_message for msg in last_messages):
+    if all(msg == first_msg for msg in last_messages):
         return True
     
     return False
+
+def check_repeated_patterns(message_text):
+    """Проверяет повторяющиеся паттерны в одном сообщении"""
+    # Убираем лишние пробелы и приводим к нижнему регистру
+    cleaned_text = ' '.join(message_text.split()).lower()
+    
+    # Разбиваем на строки для анализа
+    lines = [line.strip() for line in cleaned_text.split('\n') if line.strip()]
+    
+    # Проверяем, есть ли повторяющиеся строки (3 или более раз)
+    if len(lines) >= 3:
+        line_counts = {}
+        for line in lines:
+            line_counts[line] = line_counts.get(line, 0) + 1
+        
+        # Если какая-то строка повторяется 3 или более раз
+        for line, count in line_counts.items():
+            if count >= 3:
+                return True
     
     # Проверяем паттерны типа "1 1 1 1 1" или "а а а а а"
     words = cleaned_text.split()
