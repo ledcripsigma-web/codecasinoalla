@@ -1,6 +1,6 @@
 from flask import Flask
 import threading
-import logging
+imdef check_consecutive_identical(user_id, message_text):port logging
 import re
 import sqlite3
 import json
@@ -164,8 +164,7 @@ class Database:
         cursor.execute('UPDATE users SET message_count = message_count + 1 WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
-   
-
+    
     def add_restriction(self, user_id, chat_id, restriction_type, reason, duration_hours, admin_id, message_text, message_history):
         """Добавление мута/бана в БД"""
         conn = sqlite3.connect(self.db_path)
