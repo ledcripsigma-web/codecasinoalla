@@ -345,34 +345,27 @@ def is_admin(user_id):
     return user_id == ADMIN_ID
 
 def check_consecutive_identical(user_id, message_text):
-    """Проверяет одинаковые сообщения"""
+    """Проверяет одинаковые сообщения подряд от одного пользователя"""
     history = user_message_history[user_id]
     
-    if history and all(msg == message_text for msg in list(history)[-MAX_CONSECUTIVE_IDENTICAL+1:]):
+    # Если история пустая или последнее сообщение отличается - сбрасываем счетчик
+    if not history or history[-1] != message_text:
+        # Очищаем историю и добавляем текущее сообщение
+        history.clear()
         history.append(message_text)
-        return len(history) == MAX_CONSECUTIVE_IDENTICAL and all(msg == message_text for msg in history)
+        return False
     
+    # Добавляем текущее сообщение
     history.append(message_text)
+    
+    # Проверяем, есть ли 5 одинаковых подряд
+    if len(history) >= MAX_CONSECUTIVE_IDENTICAL:
+        # Проверяем, что все последние 5 сообщений одинаковые
+        last_messages = list(history)[-MAX_CONSECUTIVE_IDENTICAL:]
+        if all(msg == message_text for msg in last_messages):
+            return True
+    
     return False
-
-def check_repeated_patterns(message_text):
-    """Проверяет повторяющиеся паттерны в одном сообщении"""
-    # Убираем лишние пробелы и приводим к нижнему регистру
-    cleaned_text = ' '.join(message_text.split()).lower()
-    
-    # Разбиваем на строки для анализа
-    lines = [line.strip() for line in cleaned_text.split('\n') if line.strip()]
-    
-    # Проверяем, есть ли повторяющиеся строки (3 или более раз)
-    if len(lines) >= 3:
-        line_counts = {}
-        for line in lines:
-            line_counts[line] = line_counts.get(line, 0) + 1
-        
-        # Если какая-то строка повторяется 3 или более раз
-        for line, count in line_counts.items():
-            if count >= 3:
-                return True
     
     # Проверяем паттерны типа "1 1 1 1 1" или "а а а а а"
     words = cleaned_text.split()
