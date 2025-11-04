@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8207041880:AAEM1F0YaWF3jEKJ-GfRPPOosOBbpTnSY4M"
 ADMIN_ID = 8054980148
 APPEAL_TEXT = "🆘Если вас замутило по ошибке: @rilyglrletukdetuluft (моментальный ответ 14:00 — 2:00)"
+MAX_WARNS = 3  # Максимум варнов перед баном
 
 # Настройки анти-спама
 MAX_CONSECUTIVE_IDENTICAL = 5
@@ -74,6 +75,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 # Списки для отслеживания активности
 user_message_history = defaultdict(lambda: deque(maxlen=MAX_CONSECUTIVE_IDENTICAL))
 user_sticker_history = defaultdict(lambda: deque(maxlen=MAX_CONSECUTIVE_STICKERS))
+user_warns = defaultdict(int)  # Хранит количество варнов пользователя
 
 class Database:
     def __init__(self, db_path="anti_spam.db"):
@@ -126,6 +128,18 @@ class Database:
             )
         ''')
         
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS warns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                chat_id INTEGER,
+                reason TEXT,
+                admin_id INTEGER,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+        
         conn.commit()
         conn.close()
     
@@ -170,6 +184,83 @@ class Database:
         with open('restrictions_log.txt', 'a', encoding='utf-8') as f:
             end_time_str = "НИКОГДА" if end_time is None else end_time.strftime('%d.%m.%Y %H:%M')
             f.write(f"[{start_time.strftime('%d.%m.%Y %H:%M:%S')}] ЮЗ: {user_id} | Причина: {reason} | До: {end_time_str} | Сообщение: {message_text}\n")
+    
+    def add_warn(self, user_id, chat_id, reason, admin_id):
+        """Добавление варна пользователю"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO warns (user_id, chat_id, reason, admin_id)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, chat_id, reason, admin_id))
+        
+        # Обновляем счетчик варнов
+        cursor.execute('UPDATE users SET warning_count = warning_count + 1 WHERE user_id = ?', (user_id,))
+        
+        conn.commit()
+        conn.close()
+        
+        # Обновляем кэш
+        user_warns[user_id] = self.get_warn_count(user_id, chat_id)
+        
+        # Записываем в лог
+        with open('warns_log.txt', 'a', encoding='utf-8') as f:
+            f.write(f"[{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}] ЮЗ: {user_id} | ВАРН | Причина: {reason} | Админ: {admin_id}\n")
+    
+    def remove_warn(self, user_id, chat_id, admin_id):
+        """Удаление последнего варна"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Находим последний варн
+        cursor.execute('''
+            SELECT id FROM warns 
+            WHERE user_id = ? AND chat_id = ?
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        ''', (user_id, chat_id))
+        
+        result = cursor.fetchone()
+        if result:
+            warn_id = result[0]
+            # Удаляем варн
+            cursor.execute('DELETE FROM warns WHERE id = ?', (warn_id,))
+            # Обновляем счетчик
+            cursor.execute('UPDATE users SET warning_count = GREATEST(warning_count - 1, 0) WHERE user_id = ?', (user_id,))
+            
+        conn.commit()
+        conn.close()
+        
+        # Обновляем кэш
+        user_warns[user_id] = self.get_warn_count(user_id, chat_id)
+        
+        # Записываем в лог
+        with open('warns_log.txt', 'a', encoding='utf-8') as f:
+            f.write(f"[{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}] ЮЗ: {user_id} | АНВАРН | Админ: {admin_id}\n")
+    
+    def get_warn_count(self, user_id, chat_id):
+        """Получает количество варнов пользователя"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM warns WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    
+    def get_user_warns(self, user_id, chat_id):
+        """Получает все варны пользователя"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM warns 
+            WHERE user_id = ? AND chat_id = ?
+            ORDER BY timestamp DESC 
+            LIMIT 10
+        ''', (user_id, chat_id))
+        warns = cursor.fetchall()
+        conn.close()
+        return warns
     
     def get_user_stats(self, user_id, chat_id):
         """Получение статистики пользователя"""
@@ -318,6 +409,98 @@ def punish_user(user_id, chat_id, user_name, reason, duration, admin_name="Си�
         return False
     return True
 
+def ban_user(user_id, chat_id, user_name, reason, admin_name="Система"):
+    """Банит пользователя"""
+    try:
+        bot.ban_chat_member(
+            chat_id=chat_id,
+            user_id=user_id
+        )
+        
+        # Добавляем в БД
+        db.add_restriction(
+            user_id, chat_id, 'ban', reason, 
+            0, ADMIN_ID, "Бан из админ-панели", 
+            deque()
+        )
+        
+        ban_message = f"🔨 Пользователь забанен\n👤 Пользователь: {user_name}\n🛡️ Администратор: {admin_name}\n📝 Причина: {reason}"
+        
+        bot.send_message(chat_id, ban_message)
+        logger.info(f"Пользователь {user_id} забанен по причине: {reason}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при бане пользователя {user_id}: {e}")
+        return False
+    return True
+
+def unban_user(user_id, chat_id, user_name, admin_name="Система"):
+    """Разбанивает пользователя"""
+    try:
+        bot.unban_chat_member(
+            chat_id=chat_id,
+            user_id=user_id
+        )
+        
+        response = f"✅ Пользователь разбанен\n👤 Пользователь: {user_name}\n🛡️ Администратор: {admin_name}\n⏰ Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        
+        bot.send_message(chat_id, response)
+        logger.info(f"Пользователь {user_id} разбанен администратором {admin_name}")
+        
+        # Записываем в лог
+        with open('restrictions_log.txt', 'a', encoding='utf-8') as f:
+            f.write(f"[{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}] ЮЗ: {user_id} | РАЗБАНЕН | Админ: {admin_name}\n")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при разбане пользователя {user_id}: {e}")
+        return False
+    return True
+
+def warn_user(user_id, chat_id, user_name, reason, admin_name="Система"):
+    """Выдает предупреждение пользователю"""
+    try:
+        # Добавляем варн в БД
+        db.add_warn(user_id, chat_id, reason, ADMIN_ID)
+        
+        warn_count = db.get_warn_count(user_id, chat_id)
+        
+        warn_message = f"⚠️ Пользователь получил предупреждение\n👤 Пользователь: {user_name}\n🛡️ Администратор: {admin_name}\n📝 Причина: {reason}\n📊 Всего варнов: {warn_count}/{MAX_WARNS}"
+        
+        if warn_count >= MAX_WARNS:
+            # Автоматический бан при достижении лимита варнов
+            ban_reason = f"Автобан за {MAX_WARNS} предупреждений"
+            ban_user(user_id, chat_id, user_name, ban_reason, admin_name)
+            warn_message += f"\n\n🔨 Достигнут лимит {MAX_WARNS} варнов - пользователь забанен!"
+        
+        bot.send_message(chat_id, warn_message)
+        logger.info(f"Пользователь {user_id} получил варн: {reason}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при выдаче варна пользователю {user_id}: {e}")
+        return False
+    return True
+
+def unwarn_user(user_id, chat_id, user_name, admin_name="Система"):
+    """Снимает предупреждение пользователю"""
+    try:
+        current_warns = db.get_warn_count(user_id, chat_id)
+        
+        if current_warns > 0:
+            db.remove_warn(user_id, chat_id, ADMIN_ID)
+            new_warns = db.get_warn_count(user_id, chat_id)
+            
+            response = f"✅ Предупреждение снято\n👤 Пользователь: {user_name}\n🛡️ Администратор: {admin_name}\n📊 Теперь варнов: {new_warns}/{MAX_WARNS}"
+        else:
+            response = f"ℹ️ У пользователя {user_name} нет предупреждений"
+        
+        bot.send_message(chat_id, response)
+        logger.info(f"Пользователь {user_id} лишен варна администратором {admin_name}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при снятии варна пользователя {user_id}: {e}")
+        return False
+    return True
+
 def unmute_user(user_id, chat_id, user_name, admin_name="Система"):
     """Размучивает пользователя"""
     try:
@@ -383,8 +566,9 @@ def user_log_command(message):
         
         # Получаем все ограничения пользователя
         restrictions = db.get_user_restrictions(user_id, message.chat.id)
+        warns = db.get_user_warns(user_id, message.chat.id)
         
-        if not restrictions:
+        if not restrictions and not warns:
             bot.reply_to(message, f"🔍 Пользователь {search_param} не найден в базе нарушений")
             return
         
@@ -392,47 +576,68 @@ def user_log_command(message):
         log_text = f"📋 ЛОГ НАРУШЕНИЙ ПОЛЬЗОВАТЕЛЯ: {search_param}\n"
         log_text += f"👤 ID пользователя: {user_id}\n"
         log_text += f"📅 Сформирован: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n"
-        log_text += f"📊 Всего нарушений: {len(restrictions)}\n\n"
+        log_text += f"📊 Всего нарушений: {len(restrictions)}\n"
+        log_text += f"⚠️ Всего варнов: {len(warns)}\n\n"
         log_text += "=" * 50 + "\n\n"
         
-        for i, restriction in enumerate(restrictions, 1):
-            log_text += f"🚨 НАРУШЕНИЕ #{i}\n"
-            log_text += f"👤 ID пользователя: {restriction[1]}\n"
-            log_text += f"💬 Тип: {restriction[3]}\n"
-            log_text += f"📝 Причина: {restriction[4]}\n"
-            log_text += f"⏱️ Длительность: {restriction[5]} часов\n"
-            
-            # Исправляем обработку времени с микросекундами
-            start_time = restriction[6]
-            if isinstance(start_time, str):
-                # Убираем микросекунды если есть
-                if '.' in start_time:
-                    start_time = start_time.split('.')[0]
-                start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
-            log_text += f"🕐 Начало: {start_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
-            
-            end_time = restriction[7]
-            if end_time:
-                if isinstance(end_time, str):
+        # Добавляем варны в лог
+        if warns:
+            log_text += "🔸 ИСТОРИЯ ПРЕДУПРЕЖДЕНИЙ:\n\n"
+            for i, warn in enumerate(warns, 1):
+                log_text += f"⚠️ ВАРН #{i}\n"
+                log_text += f"📝 Причина: {warn[3]}\n"
+                
+                # Исправляем обработку времени
+                warn_time = warn[5]
+                if isinstance(warn_time, str):
+                    if '.' in warn_time:
+                        warn_time = warn_time.split('.')[0]
+                    warn_time = datetime.strptime(warn_time, '%Y-%m-%d %H:%M:%S')
+                log_text += f"🕐 Время: {warn_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
+                log_text += f"👮 Админ ID: {warn[4]}\n"
+                log_text += "─" * 30 + "\n\n"
+        
+        # Добавляем нарушения в лог
+        if restrictions:
+            log_text += "🔹 ИСТОРИЯ НАРУШЕНИЙ:\n\n"
+            for i, restriction in enumerate(restrictions, 1):
+                log_text += f"🚨 НАРУШЕНИЕ #{i}\n"
+                log_text += f"👤 ID пользователя: {restriction[1]}\n"
+                log_text += f"💬 Тип: {restriction[3]}\n"
+                log_text += f"📝 Причина: {restriction[4]}\n"
+                log_text += f"⏱️ Длительность: {restriction[5]} часов\n"
+                
+                # Исправляем обработку времени с микросекундами
+                start_time = restriction[6]
+                if isinstance(start_time, str):
                     # Убираем микросекунды если есть
-                    if '.' in end_time:
-                        end_time = end_time.split('.')[0]
-                    end_time = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
-                log_text += f"🕒 Конец: {end_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
-                # Проверяем активно ли еще ограничение
-                if end_time > datetime.now():
-                    log_text += f"📊 Статус: 🔴 АКТИВНО\n"
+                    if '.' in start_time:
+                        start_time = start_time.split('.')[0]
+                    start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
+                log_text += f"🕐 Начало: {start_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
+                
+                end_time = restriction[7]
+                if end_time:
+                    if isinstance(end_time, str):
+                        # Убираем микросекунды если есть
+                        if '.' in end_time:
+                            end_time = end_time.split('.')[0]
+                        end_time = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
+                    log_text += f"🕒 Конец: {end_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
+                    # Проверяем активно ли еще ограничение
+                    if end_time > datetime.now():
+                        log_text += f"📊 Статус: 🔴 АКТИВНО\n"
+                    else:
+                        log_text += f"📊 Статус: 🟢 ЗАВЕРШЕНО\n"
                 else:
-                    log_text += f"📊 Статус: 🟢 ЗАВЕРШЕНО\n"
-            else:
-                log_text += f"🕒 Конец: НИКОГДА\n"
-                log_text += f"📊 Статус: 🔴 АКТИВНО\n"
-            
-            log_text += f"👮 Админ ID: {restriction[8]}\n"
-            if restriction[9]:  # message_text
-                log_text += f"💭 Сообщение: {restriction[9][:100]}...\n"
-            
-            log_text += "─" * 40 + "\n\n"
+                    log_text += f"🕒 Конец: НИКОГДА\n"
+                    log_text += f"📊 Статус: 🔴 АКТИВНО\n"
+                
+                log_text += f"👮 Админ ID: {restriction[8]}\n"
+                if restriction[9]:  # message_text
+                    log_text += f"💭 Сообщение: {restriction[9][:100]}...\n"
+                
+                log_text += "─" * 40 + "\n\n"
         
         # Создаем файл в памяти
         file = io.BytesIO(log_text.encode('utf-8'))
@@ -447,7 +652,7 @@ def user_log_command(message):
         bot.send_document(
             message.chat.id, 
             file, 
-            caption=f"📄 Лог нарушений пользователя {search_param}\n📊 Нарушений: {len(restrictions)}"
+            caption=f"📄 Лог нарушений пользователя {search_param}\n📊 Нарушений: {len(restrictions)} | Варнов: {len(warns)}"
         )
         
         logger.info(f"Админ {message.from_user.id} запросил лог пользователя {search_param}")
@@ -463,7 +668,11 @@ def admin_panel_keyboard():
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
         InlineKeyboardButton("🔇 Мут", callback_data="admin_mute"),
-        InlineKeyboardButton("🔊 Размут", callback_data="admin_unmute")
+        InlineKeyboardButton("🔊 Размут", callback_data="admin_unmute"),
+        InlineKeyboardButton("⚠️ Варн", callback_data="admin_warn"),
+        InlineKeyboardButton("✅ Анварн", callback_data="admin_unwarn"),
+        InlineKeyboardButton("🔨 Бан", callback_data="admin_ban"),
+        InlineKeyboardButton("🔄 Анбан", callback_data="admin_unban")
     )
     return keyboard
 
@@ -503,6 +712,34 @@ def handle_admin_actions(call):
             "🔊 **Размут пользователя**\nВведите ID чата:"
         )
         bot.register_next_step_handler(msg, process_unmute_chat)
+        
+    elif call.data == "admin_warn":
+        msg = bot.send_message(
+            call.message.chat.id,
+            "⚠️ **Выдать предупреждение**\nВведите ID чата:"
+        )
+        bot.register_next_step_handler(msg, process_warn_chat)
+        
+    elif call.data == "admin_unwarn":
+        msg = bot.send_message(
+            call.message.chat.id,
+            "✅ **Снять предупреждение**\nВведите ID чата:"
+        )
+        bot.register_next_step_handler(msg, process_unwarn_chat)
+        
+    elif call.data == "admin_ban":
+        msg = bot.send_message(
+            call.message.chat.id,
+            "🔨 **Забанить пользователя**\nВведите ID чата:"
+        )
+        bot.register_next_step_handler(msg, process_ban_chat)
+        
+    elif call.data == "admin_unban":
+        msg = bot.send_message(
+            call.message.chat.id,
+            "🔄 **Разбанить пользователя**\nВведите ID чата:"
+        )
+        bot.register_next_step_handler(msg, process_unban_chat)
     
     bot.answer_callback_query(call.id)
 
@@ -529,6 +766,58 @@ def process_unmute_chat(message):
             "🔊 **Размут пользователя**\nВведите ID пользователя:\n`123456789`"
         )
         bot.register_next_step_handler(msg, process_unmute_final)
+    except ValueError:
+        bot.reply_to(message, "❌ Неверный ID чата!")
+
+def process_warn_chat(message):
+    """Получаем ID чата для варна"""
+    try:
+        chat_id = int(message.text)
+        admin_data[message.from_user.id] = {'chat_id': chat_id, 'action': 'warn'}
+        msg = bot.send_message(
+            message.chat.id,
+            "⚠️ **Выдать предупреждение**\nВведите ID пользователя и причину:\n`123456789 спам`"
+        )
+        bot.register_next_step_handler(msg, process_warn_final)
+    except ValueError:
+        bot.reply_to(message, "❌ Неверный ID чата!")
+
+def process_unwarn_chat(message):
+    """Получаем ID чата для анварна"""
+    try:
+        chat_id = int(message.text)
+        admin_data[message.from_user.id] = {'chat_id': chat_id, 'action': 'unwarn'}
+        msg = bot.send_message(
+            message.chat.id,
+            "✅ **Снять предупреждение**\nВведите ID пользователя:\n`123456789`"
+        )
+        bot.register_next_step_handler(msg, process_unwarn_final)
+    except ValueError:
+        bot.reply_to(message, "❌ Неверный ID чата!")
+
+def process_ban_chat(message):
+    """Получаем ID чата для бана"""
+    try:
+        chat_id = int(message.text)
+        admin_data[message.from_user.id] = {'chat_id': chat_id, 'action': 'ban'}
+        msg = bot.send_message(
+            message.chat.id,
+            "🔨 **Забанить пользователя**\nВведите ID пользователя и причину:\n`123456789 спам`"
+        )
+        bot.register_next_step_handler(msg, process_ban_final)
+    except ValueError:
+        bot.reply_to(message, "❌ Неверный ID чата!")
+
+def process_unban_chat(message):
+    """Получаем ID чата для анбана"""
+    try:
+        chat_id = int(message.text)
+        admin_data[message.from_user.id] = {'chat_id': chat_id, 'action': 'unban'}
+        msg = bot.send_message(
+            message.chat.id,
+            "🔄 **Разбанить пользователя**\nВведите ID пользователя:\n`123456789`"
+        )
+        bot.register_next_step_handler(msg, process_unban_final)
     except ValueError:
         bot.reply_to(message, "❌ Неверный ID чата!")
 
@@ -598,23 +887,165 @@ def process_unmute_final(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
 
+def process_warn_final(message):
+    """Выдает предупреждение пользователю"""
+    try:
+        user_data = admin_data.get(message.from_user.id)
+        if not user_data:
+            bot.reply_to(message, "❌ Ошибка данных!")
+            return
+        
+        chat_id = user_data['chat_id']
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "❌ Формат: user_id [причина]")
+            return
+        
+        user_id = int(parts[0])
+        reason = ' '.join(parts[1:]) if len(parts) > 1 else "Предупреждение из админ-панели"
+        
+        # Получаем информацию о пользователе
+        try:
+            user = bot.get_chat_member(chat_id, user_id)
+            user_name = user.user.first_name
+        except:
+            user_name = f"ID: {user_id}"
+        
+        # ВЫДАЕМ ПРЕДУПРЕЖДЕНИЕ
+        success = warn_user(user_id, chat_id, user_name, reason, message.from_user.first_name)
+        
+        if success:
+            bot.reply_to(message, f"✅ Пользователь {user_name} получил предупреждение в чате {chat_id}")
+        else:
+            bot.reply_to(message, f"❌ Ошибка при выдаче предупреждения")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+def process_unwarn_final(message):
+    """Снимает предупреждение пользователю"""
+    try:
+        user_data = admin_data.get(message.from_user.id)
+        if not user_data:
+            bot.reply_to(message, "❌ Ошибка данных!")
+            return
+        
+        chat_id = user_data['chat_id']
+        user_id = int(message.text.strip())
+        
+        # Получаем информацию о пользователе
+        try:
+            user = bot.get_chat_member(chat_id, user_id)
+            user_name = user.user.first_name
+        except:
+            user_name = f"ID: {user_id}"
+        
+        # СНИМАЕМ ПРЕДУПРЕЖДЕНИЕ
+        success = unwarn_user(user_id, chat_id, user_name, message.from_user.first_name)
+        
+        if success:
+            bot.reply_to(message, f"✅ С пользователя {user_name} снято предупреждение в чате {chat_id}")
+        else:
+            bot.reply_to(message, f"❌ Ошибка при снятии предупреждения")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+def process_ban_final(message):
+    """Выполняет бан пользователя"""
+    try:
+        user_data = admin_data.get(message.from_user.id)
+        if not user_data:
+            bot.reply_to(message, "❌ Ошибка данных!")
+            return
+        
+        chat_id = user_data['chat_id']
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "❌ Формат: user_id [причина]")
+            return
+        
+        user_id = int(parts[0])
+        reason = ' '.join(parts[1:]) if len(parts) > 1 else "Бан из админ-панели"
+        
+        # Получаем информацию о пользователе
+        try:
+            user = bot.get_chat_member(chat_id, user_id)
+            user_name = user.user.first_name
+        except:
+            user_name = f"ID: {user_id}"
+        
+        # ВЫПОЛНЯЕМ РЕАЛЬНЫЙ БАН
+        success = ban_user(user_id, chat_id, user_name, reason, message.from_user.first_name)
+        
+        if success:
+            bot.reply_to(message, f"✅ Пользователь {user_name} забанен в чате {chat_id}")
+        else:
+            bot.reply_to(message, f"❌ Ошибка при бане пользователя")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+def process_unban_final(message):
+    """Выполняет разбан пользователя"""
+    try:
+        user_data = admin_data.get(message.from_user.id)
+        if not user_data:
+            bot.reply_to(message, "❌ Ошибка данных!")
+            return
+        
+        chat_id = user_data['chat_id']
+        user_id = int(message.text.strip())
+        
+        # Получаем информацию о пользователе
+        try:
+            user = bot.get_chat_member(chat_id, user_id)
+            user_name = user.user.first_name
+        except:
+            user_name = f"ID: {user_id}"
+        
+        # ВЫПОЛНЯЕМ РЕАЛЬНЫЙ РАЗБАН
+        success = unban_user(user_id, chat_id, user_name, message.from_user.first_name)
+        
+        if success:
+            bot.reply_to(message, f"✅ Пользователь {user_name} разбанен в чате {chat_id}")
+        else:
+            bot.reply_to(message, f"❌ Ошибка при разбане пользователя")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
 # Обработчики команд
 @bot.message_handler(commands=['start'])
 def start_command(message):
     """Обрабатывает команду /start"""
-    start_text = """📖 Правила модерации:
+    start_text = """🤖 **Добро пожаловать в Anti-Spam Bot!**
+
+📋 **Перед началом работы:**
+1. Добавьте бота в ваш чат
+2. Выдайте боту права администратора
+3. Убедитесь, что бот может:
+   - Удалять сообщения
+   - Банить пользователей
+   - Ограничивать права (мутить)
+
+📖 **Правила модерации:**
 
 🔇 Муты:
 • Спам сообщениями – 1 час
-• Спам стикерами – 1 час
+• Спам стикерами – 1 час  
 • Оскорбления родни – 24 часа
 • Реклама – навсегда
 • Запрещенный контент – навсегда
 
+⚠️ Предупреждения:
+• 3 предупреждения = автоматический бан
+
 🆘 Замутили в чате по ошибке?
 @rilyglrletukdetuluft (14:00-2:00)
 
-🤖 Бот работает 24/7"""
+⚙️ Админ-панель: /admin"""
+    
     bot.reply_to(message, start_text)
 
 @bot.message_handler(commands=['check'])
@@ -633,6 +1064,7 @@ def check_command(message):
         restrictions = db.get_user_restrictions(user_id, message.chat.id)
         active_restriction = db.get_active_restriction(user_id, message.chat.id)
         message_count = db.get_user_stats(user_id, message.chat.id)
+        warn_count = db.get_warn_count(user_id, message.chat.id)
         
         response = f"🔍 **Информация о пользователе** @{username}\n\n"
         
@@ -652,6 +1084,7 @@ def check_command(message):
             response += f"📊 Статус: ✅ Активен\n"
         
         response += f"💬 Сообщений в чате: {message_count}\n"
+        response += f"⚠️ Предупреждений: {warn_count}/{MAX_WARNS}\n"
         response += f"📋 Всего нарушений: {len(restrictions)}\n"
         
         if restrictions:
@@ -726,5 +1159,6 @@ if __name__ == '__main__':
     print("👑 Админ ID: 8054980148")
     print("🛠️ Админ-панель: /admin")
     print("📄 Команда /log ID/@username - получить лог нарушений пользователя")
+    print("⚠️ Система предупреждений: 3 варна = бан")
     print("🔍 Команда /check работает!")
     bot.infinity_polling()
