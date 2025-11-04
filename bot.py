@@ -1,6 +1,6 @@
 from flask import Flask
 import threading
-import logging
+imdef check_consecutive_identical(user_id, message_text):port logging
 import re
 import sqlite3
 import json
@@ -344,26 +344,24 @@ def is_admin(user_id):
     """Проверка, является ли пользователь администратором"""
     return user_id == ADMIN_ID
 
-def check_consecutive_identical(user_id, message_text):
-    """Проверяет одинаковые сообщения подряд от одного пользователя"""
+   def check_consecutive_identical(user_id, message_text):
+    """Проверяет одинаковые сообщения"""
     history = user_message_history[user_id]
     
-    # Если история пустая или последнее сообщение отличается - сбрасываем счетчик
-    if not history or history[-1] != message_text:
-        # Очищаем историю и добавляем текущее сообщение
-        history.clear()
-        history.append(message_text)
-        return False
-    
-    # Добавляем текущее сообщение
+    # Добавляем текущее сообщение в историю
     history.append(message_text)
     
-    # Проверяем, есть ли 5 одинаковых подряд
-    if len(history) >= MAX_CONSECUTIVE_IDENTICAL:
-        # Проверяем, что все последние 5 сообщений одинаковые
-        last_messages = list(history)[-MAX_CONSECUTIVE_IDENTICAL:]
-        if all(msg == message_text for msg in last_messages):
-            return True
+    # Проверяем только если в истории достаточно сообщений
+    if len(history) < MAX_CONSECUTIVE_IDENTICAL:
+        return False
+    
+    # Берем последние 5 сообщений
+    last_messages = list(history)[-MAX_CONSECUTIVE_IDENTICAL:]
+    
+    # Проверяем, что все 5 сообщений одинаковые
+    first_message = last_messages[0]
+    if all(msg == first_message for msg in last_messages):
+        return True
     
     return False
     
