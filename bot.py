@@ -363,18 +363,16 @@ def check_repeated_patterns(message_text):
     # Разбиваем на строки для анализа
     lines = [line.strip() for line in cleaned_text.split('\n') if line.strip()]
     
-    if len(lines) < 3:
-        return False
-    
-    # Проверяем, есть ли повторяющиеся строки
-    line_counts = {}
-    for line in lines:
-        line_counts[line] = line_counts.get(line, 0) + 1
-    
-    # Если какая-то строка повторяется 3 или более раз
-    for line, count in line_counts.items():
-        if count >= 3:
-            return True
+    # Проверяем, есть ли повторяющиеся строки (3 или более раз)
+    if len(lines) >= 3:
+        line_counts = {}
+        for line in lines:
+            line_counts[line] = line_counts.get(line, 0) + 1
+        
+        # Если какая-то строка повторяется 3 или более раз
+        for line, count in line_counts.items():
+            if count >= 3:
+                return True
     
     # Проверяем паттерны типа "1 1 1 1 1" или "а а а а а"
     words = cleaned_text.split()
@@ -383,11 +381,35 @@ def check_repeated_patterns(message_text):
         if all(word == words[0] for word in words):
             return True
         
-        # Проверяем паттерны повторения (каждое второе слово одинаковое)
-        if len(words) >= 10:
+        # Проверяем много повторяющихся слов
+        if len(words) >= 8:
+            word_counts = {}
+            for word in words:
+                word_counts[word] = word_counts.get(word, 0) + 1
+            
+            # Если есть слово, которое повторяется 5+ раз
+            for word, count in word_counts.items():
+                if count >= 5:
+                    return True
+            
+            # Если очень мало уникальных слов в длинном сообщении
             unique_words = set(words)
-            if len(unique_words) <= 2:  # Только 1-2 уникальных слова
+            if len(unique_words) <= 3 and len(words) >= 10:
                 return True
+    
+    # Проверяем повторение одинаковых символов или цифр
+    if len(message_text) >= 10:
+        # Проверяем паттерны типа "11111", "aaaaa", "+-+-+-"
+        chars = list(message_text.replace(' ', '').replace('\n', ''))
+        if len(chars) >= 5:
+            char_counts = {}
+            for char in chars:
+                char_counts[char] = char_counts.get(char, 0) + 1
+            
+            # Если один символ повторяется много раз
+            for char, count in char_counts.items():
+                if count >= 8:
+                    return True
     
     return False
 
@@ -581,6 +603,16 @@ def unmute_user(user_id, chat_id, user_name, admin_name="Система"):
         return False
     return True
 
+def delete_message_by_link(chat_id, message_id, admin_name="Система"):
+    """Удаляет сообщение по ссылке"""
+    try:
+        bot.delete_message(chat_id, message_id)
+        logger.info(f"Сообщение {message_id} удалено из чата {chat_id} администратором {admin_name}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при удалении сообщения {message_id}: {e}")
+        return False
+
 # КОМАНДА /log ДЛЯ ПОЛУЧЕНИЯ ЛОГОВ ПОЛЬЗОВАТЕЛЯ
 @bot.message_handler(commands=['log'])
 def user_log_command(message):
@@ -766,7 +798,8 @@ def admin_panel_keyboard():
         InlineKeyboardButton("⚠️ Варн", callback_data="admin_warn"),
         InlineKeyboardButton("✅ Анварн", callback_data="admin_unwarn"),
         InlineKeyboardButton("🔨 Бан", callback_data="admin_ban"),
-        InlineKeyboardButton("🔄 Анбан", callback_data="admin_unban")
+        InlineKeyboardButton("🔄 Анбан", callback_data="admin_unban"),
+        InlineKeyboardButton("🗑️ Удалить сообщение", callback_data="admin_delete")
     )
     return keyboard
 
@@ -979,6 +1012,14 @@ def handle_admin_actions(call):
             "🔄 Разбанить пользователя\nВведите ID чата:"
         )
         bot.register_next_step_handler(msg, process_unban_chat)
+        
+    elif call.data == "admin_delete":
+        msg = bot.send_message(
+            call.message.chat.id,
+            "🗑️ Удалить сообщение\nВведите ссылку на сообщение в формате:\n`https://t.me/c/CHAT_ID/MESSAGE_ID`\n\n💡 *Как получить ссылку:*\n1. Нажмите на сообщение в чате\n2. Выберите 'Копировать ссылку'\n3. Отправьте ссылку боту",
+            parse_mode='Markdown'
+        )
+        bot.register_next_step_handler(msg, process_delete_message)
     
     bot.answer_callback_query(call.id)
 
@@ -1059,6 +1100,34 @@ def process_unban_chat(message):
         bot.register_next_step_handler(msg, process_unban_final)
     except ValueError:
         bot.reply_to(message, "❌ Неверный ID чата!")
+
+def process_delete_message(message):
+    """Обрабатывает удаление сообщения по ссылке"""
+    try:
+        message_link = message.text.strip()
+        
+        # Парсим ссылку на сообщение
+        # Формат: https://t.me/c/CHAT_ID/MESSAGE_ID
+        if "t.me/c/" in message_link:
+            parts = message_link.split("/")
+            if len(parts) >= 6:
+                chat_id = int("-100" + parts[4])  # Преобразуем в формат для бота
+                message_id = int(parts[5])
+                
+                # Пытаемся удалить сообщение
+                success = delete_message_by_link(chat_id, message_id, message.from_user.first_name)
+                
+                if success:
+                    bot.reply_to(message, f"✅ Сообщение успешно удалено!\n💬 ID сообщения: {message_id}\n👥 Чат ID: {chat_id}")
+                else:
+                    bot.reply_to(message, "❌ Не удалось удалить сообщение. Проверьте:\n• Права бота в чате\n• Корректность ссылки\n• Существование сообщения")
+            else:
+                bot.reply_to(message, "❌ Неверный формат ссылки. Используйте: https://t.me/c/CHAT_ID/MESSAGE_ID")
+        else:
+            bot.reply_to(message, "❌ Неверная ссылка. Убедитесь, что это ссылка на сообщение из чата.")
+            
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка при удалении сообщения: {e}")
 
 def process_mute_final(message):
     """Выполняет мут пользователя"""
@@ -1380,4 +1449,5 @@ if __name__ == '__main__':
     print("⚠️ Система предупреждений: 3 варна = бан (сгорают через 3 дня)")
     print("🔍 Команда /check работает!")
     print("🆕 Обнаружение спама: повторяющиеся паттерны в одном сообщении")
+    print("🗑️ Новая функция: удаление сообщений по ссылке в админ-панели")
     bot.infinity_polling()
