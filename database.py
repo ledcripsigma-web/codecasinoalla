@@ -59,6 +59,21 @@ class Database:
             )
         ''')
         
+        # Таблица варнов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS warns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                chat_id INTEGER,
+                reason TEXT,
+                admin_id INTEGER,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expire_time TIMESTAMP,
+                is_active BOOLEAN DEFAULT 1,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+        
         conn.commit()
         conn.close()
     
@@ -170,7 +185,7 @@ class Database:
         return user, restrictions
     
     def get_user_stats(self, user_id, chat_id):
-        """Получение статистики пользователя"""
+        """Получение статистики пользователя в конкретном чате"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -180,15 +195,68 @@ class Database:
         ''', (user_id, chat_id))
         
         message_count = cursor.fetchone()[0]
-        
-        cursor.execute('''
-            SELECT warning_count FROM users WHERE user_id = ?
-        ''', (user_id,))
-        
-        warning_count = cursor.fetchone()[0] if cursor.fetchone() else 0
-        
         conn.close()
-        return message_count, warning_count
+        return message_count
+    
+    def get_user_stats_all_chats(self, user_id):
+        """Получение статистики пользователя во всех чатах"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) FROM message_history WHERE user_id = ?', (user_id,))
+        message_count = cursor.fetchone()[0]
+        conn.close()
+        return message_count
+    
+    def get_user_stats_today(self, user_id, chat_id):
+        """Получение статистики пользователя за сегодня в конкретном чате"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute('SELECT COUNT(*) FROM message_history WHERE user_id = ? AND chat_id = ? AND DATE(timestamp) = ?', (user_id, chat_id, today))
+        message_count = cursor.fetchone()[0]
+        conn.close()
+        return message_count
+    
+    def get_user_stats_today_all_chats(self, user_id):
+        """Получение статистики пользователя за сегодня во всех чатах"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute('SELECT COUNT(*) FROM message_history WHERE user_id = ? AND DATE(timestamp) = ?', (user_id, today))
+        message_count = cursor.fetchone()[0]
+        conn.close()
+        return message_count
+    
+    def get_user_join_date(self, user_id):
+        """Получает дату регистрации пользователя в боте"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT join_date FROM users WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result and result[0]:
+            join_date = result[0]
+            if isinstance(join_date, str):
+                join_date = datetime.strptime(join_date, '%Y-%m-%d %H:%M:%S')
+            return join_date
+        return None
+    
+    def get_user_first_message_date(self, user_id, chat_id):
+        """Получает дату первого сообщения пользователя в чате"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT MIN(timestamp) FROM message_history WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result and result[0]:
+            first_date = result[0]
+            if isinstance(first_date, str):
+                first_date = datetime.strptime(first_date, '%Y-%m-%d %H:%M:%S')
+            return first_date
+        return None
     
     def deactivate_restriction(self, user_id, chat_id, admin_id):
         """Деактивирует текущее ограничение пользователя (размут)"""
@@ -221,3 +289,100 @@ class Database:
         restriction = cursor.fetchone()
         conn.close()
         return restriction
+    
+    def get_user_restrictions(self, user_id, chat_id):
+        """Получает все ограничения пользователя"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM restrictions 
+            WHERE user_id = ? AND chat_id = ?
+            ORDER BY start_time DESC 
+            LIMIT 10
+        ''', (user_id, chat_id))
+        restrictions = cursor.fetchall()
+        conn.close()
+        return restrictions
+    
+    def add_warn(self, user_id, chat_id, reason, admin_id, expire_days=3):
+        """Добавление варна пользователю"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        expire_time = datetime.now() + timedelta(days=expire_days)
+        
+        cursor.execute('''
+            INSERT INTO warns (user_id, chat_id, reason, admin_id, expire_time)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, chat_id, reason, admin_id, expire_time))
+        
+        # Обновляем счетчик активных варнов
+        cursor.execute('UPDATE users SET warning_count = warning_count + 1 WHERE user_id = ?', (user_id,))
+        
+        conn.commit()
+        conn.close()
+    
+    def remove_warn(self, user_id, chat_id, admin_id):
+        """Удаление последнего варна"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Находим последний варн
+        cursor.execute('''
+            SELECT id FROM warns 
+            WHERE user_id = ? AND chat_id = ?
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        ''', (user_id, chat_id))
+        
+        result = cursor.fetchone()
+        if result:
+            warn_id = result[0]
+            # Удаляем варн
+            cursor.execute('DELETE FROM warns WHERE id = ?', (warn_id,))
+            # Обновляем счетчик
+            cursor.execute('UPDATE users SET warning_count = GREATEST(warning_count - 1, 0) WHERE user_id = ?', (user_id,))
+            
+        conn.commit()
+        conn.close()
+    
+    def get_active_warn_count(self, user_id, chat_id):
+        """Получает количество активных варнов пользователя в чате"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM warns WHERE user_id = ? AND chat_id = ? AND is_active = 1 AND (expire_time IS NULL OR expire_time > CURRENT_TIMESTAMP)', (user_id, chat_id))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    
+    def get_active_warn_count_all_chats(self, user_id):
+        """Получает количество активных варнов пользователя во всех чатах"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM warns WHERE user_id = ? AND is_active = 1 AND (expire_time IS NULL OR expire_time > CURRENT_TIMESTAMP)', (user_id,))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    
+    def get_user_warns(self, user_id, chat_id):
+        """Получает все варны пользователя"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM warns 
+            WHERE user_id = ? AND chat_id = ?
+            ORDER BY timestamp DESC 
+            LIMIT 10
+        ''', (user_id, chat_id))
+        warns = cursor.fetchall()
+        conn.close()
+        return warns
+    
+    def find_user_by_username(self, username):
+        """Находит пользователя по юзернейму"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM users WHERE username = ?', (username,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
