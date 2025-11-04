@@ -55,8 +55,6 @@ MAX_CONSECUTIVE_STICKERS = 5
 SPAM_MUTE_DURATION = 3600
 INSULT_MUTE_DURATION = 86400
 
-def check_consecutive_identical(user_id, message_text):port logging
-
 # Запрещенные фразы для мута
 BANNED_PHRASES = [
     # Оскорбления родни
