@@ -47,6 +47,7 @@ BOT_TOKEN = "8207041880:AAEM1F0YaWF3jEKJ-GfRPPOosOBbpTnSY4M"
 ADMIN_ID = 8054980148
 APPEAL_TEXT = "🆘Если вас замутило по ошибке: @rilyglrletukdetuluft (моментальный ответ 14:00 — 2:00)"
 MAX_WARNS = 3  # Максимум варнов перед баном
+WARN_EXPIRE_DAYS = 3  # Варны сгорают через 3 дня
 
 # Настройки анти-спама
 MAX_CONSECUTIVE_IDENTICAL = 5
@@ -136,6 +137,8 @@ class Database:
                 reason TEXT,
                 admin_id INTEGER,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expire_time TIMESTAMP,
+                is_active BOOLEAN DEFAULT 1,
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         ''')
@@ -190,23 +193,25 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        cursor.execute('''
-            INSERT INTO warns (user_id, chat_id, reason, admin_id)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, chat_id, reason, admin_id))
+        expire_time = datetime.now() + timedelta(days=WARN_EXPIRE_DAYS)
         
-        # Обновляем счетчик варнов
+        cursor.execute('''
+            INSERT INTO warns (user_id, chat_id, reason, admin_id, expire_time)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, chat_id, reason, admin_id, expire_time))
+        
+        # Обновляем счетчик активных варнов
         cursor.execute('UPDATE users SET warning_count = warning_count + 1 WHERE user_id = ?', (user_id,))
         
         conn.commit()
         conn.close()
         
         # Обновляем кэш
-        user_warns[user_id] = self.get_warn_count(user_id, chat_id)
+        user_warns[user_id] = self.get_active_warn_count(user_id, chat_id)
         
         # Записываем в лог
         with open('warns_log.txt', 'a', encoding='utf-8') as f:
-            f.write(f"[{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}] ЮЗ: {user_id} | ВАРН | Причина: {reason} | Админ: {admin_id}\n")
+            f.write(f"[{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}] ЮЗ: {user_id} | ВАРН | Причина: {reason} | Админ: {admin_id} | Сгорает: {expire_time.strftime('%d.%m.%Y %H:%M')}\n")
     
     def remove_warn(self, user_id, chat_id, admin_id):
         """Удаление последнего варна"""
@@ -233,17 +238,17 @@ class Database:
         conn.close()
         
         # Обновляем кэш
-        user_warns[user_id] = self.get_warn_count(user_id, chat_id)
+        user_warns[user_id] = self.get_active_warn_count(user_id, chat_id)
         
         # Записываем в лог
         with open('warns_log.txt', 'a', encoding='utf-8') as f:
             f.write(f"[{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}] ЮЗ: {user_id} | АНВАРН | Админ: {admin_id}\n")
     
-    def get_warn_count(self, user_id, chat_id):
-        """Получает количество варнов пользователя"""
+    def get_active_warn_count(self, user_id, chat_id):
+        """Получает количество активных варнов пользователя"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM warns WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+        cursor.execute('SELECT COUNT(*) FROM warns WHERE user_id = ? AND chat_id = ? AND is_active = 1 AND (expire_time IS NULL OR expire_time > CURRENT_TIMESTAMP)', (user_id, chat_id))
         count = cursor.fetchone()[0]
         conn.close()
         return count
@@ -267,6 +272,16 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM message_history WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+        message_count = cursor.fetchone()[0]
+        conn.close()
+        return message_count
+    
+    def get_user_stats_today(self, user_id, chat_id):
+        """Получение статистики пользователя за сегодня"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute('SELECT COUNT(*) FROM message_history WHERE user_id = ? AND chat_id = ? AND DATE(timestamp) = ?', (user_id, chat_id, today))
         message_count = cursor.fetchone()[0]
         conn.close()
         return message_count
@@ -462,9 +477,9 @@ def warn_user(user_id, chat_id, user_name, reason, admin_name="Система"):
         # Добавляем варн в БД
         db.add_warn(user_id, chat_id, reason, ADMIN_ID)
         
-        warn_count = db.get_warn_count(user_id, chat_id)
+        warn_count = db.get_active_warn_count(user_id, chat_id)
         
-        warn_message = f"⚠️ Пользователь получил предупреждение\n👤 Пользователь: {user_name}\n🛡️ Администратор: {admin_name}\n📝 Причина: {reason}\n📊 Всего варнов: {warn_count}/{MAX_WARNS}"
+        warn_message = f"⚠️ Пользователь получил предупреждение\n👤 Пользователь: {user_name}\n🛡️ Администратор: {admin_name}\n📝 Причина: {reason}\n📊 Всего варнов: {warn_count}/{MAX_WARNS}\n⏰ Сгорит через: {WARN_EXPIRE_DAYS} дней"
         
         if warn_count >= MAX_WARNS:
             # Автоматический бан при достижении лимита варнов
@@ -483,15 +498,15 @@ def warn_user(user_id, chat_id, user_name, reason, admin_name="Система"):
 def unwarn_user(user_id, chat_id, user_name, admin_name="Система"):
     """Снимает предупреждение пользователю"""
     try:
-        current_warns = db.get_warn_count(user_id, chat_id)
+        current_warns = db.get_active_warn_count(user_id, chat_id)
         
         if current_warns > 0:
             db.remove_warn(user_id, chat_id, ADMIN_ID)
-            new_warns = db.get_warn_count(user_id, chat_id)
+            new_warns = db.get_active_warn_count(user_id, chat_id)
             
             response = f"✅ Предупреждение снято\n👤 Пользователь: {user_name}\n🛡️ Администратор: {admin_name}\n📊 Теперь варнов: {new_warns}/{MAX_WARNS}"
         else:
-            response = f"ℹ️ У пользователя {user_name} нет предупреждений"
+            response = f"ℹ️ У пользователя {user_name} нет активных предупреждений"
         
         bot.send_message(chat_id, response)
         logger.info(f"Пользователь {user_id} лишен варна администратором {admin_name}")
@@ -594,6 +609,15 @@ def user_log_command(message):
                         warn_time = warn_time.split('.')[0]
                     warn_time = datetime.strptime(warn_time, '%Y-%m-%d %H:%M:%S')
                 log_text += f"🕐 Время: {warn_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
+                
+                expire_time = warn[6]
+                if expire_time:
+                    if isinstance(expire_time, str):
+                        if '.' in expire_time:
+                            expire_time = expire_time.split('.')[0]
+                        expire_time = datetime.strptime(expire_time, '%Y-%m-%d %H:%M:%S')
+                    log_text += f"⏰ Сгорит: {expire_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
+                
                 log_text += f"👮 Админ ID: {warn[4]}\n"
                 log_text += "─" * 30 + "\n\n"
         
@@ -662,6 +686,40 @@ def user_log_command(message):
         bot.reply_to(message, error_msg)
         logger.error(error_msg)
 
+# КОМАНДА /profile ДЛЯ ПОЛЬЗОВАТЕЛЕЙ
+@bot.message_handler(commands=['profile'])
+def profile_command(message):
+    """Команда /profile для просмотра статистики пользователя"""
+    try:
+        user_id = message.from_user.id
+        chat_id = message.chat.id
+        
+        # Получаем статистику
+        total_messages = db.get_user_stats(user_id, chat_id)
+        today_messages = db.get_user_stats_today(user_id, chat_id)
+        warn_count = db.get_active_warn_count(user_id, chat_id)
+        
+        # Получаем информацию о пользователе
+        user_name = message.from_user.first_name
+        username = f"@{message.from_user.username}" if message.from_user.username else "Не указан"
+        
+        profile_text = f"👤 Профиль пользователя\n\n"
+        profile_text += f"🆔 ID: {user_id}\n"
+        profile_text += f"📛 Имя: {user_name}\n"
+        profile_text += f"🔗 Юзернейм: {username}\n\n"
+        profile_text += f"📊 Статистика в этом чате:\n"
+        profile_text += f"💬 Всего сообщений: {total_messages}\n"
+        profile_text += f"📅 Сообщений сегодня: {today_messages}\n"
+        profile_text += f"⚠️ Активных предупреждений: {warn_count}/{MAX_WARNS}\n"
+        
+        if warn_count > 0:
+            profile_text += f"⏰ Предупреждения сгорят через {WARN_EXPIRE_DAYS} дней\n"
+        
+        bot.reply_to(message, profile_text)
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка при получении профиля: {e}")
+
 # АДМИН ПАНЕЛЬ
 def admin_panel_keyboard():
     """Клавиатура админ-панели"""
@@ -685,14 +743,144 @@ def admin_command(message):
     
     bot.send_message(
         message.chat.id,
-        "🛠️ **Админ-панель**\nВыберите действие:",
+        "🛠️ Админ-панель\nВыберите действие:",
         reply_markup=admin_panel_keyboard()
     )
+
+# КЛАВИАТУРА ДЛЯ СТАРТА
+def start_keyboard():
+    """Клавиатура для команды /start"""
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    
+    # Кнопки для всех пользователей
+    keyboard.add(
+        InlineKeyboardButton("👤 Мой профиль", callback_data="start_profile")
+    )
+    
+    # Кнопки только для админа
+    if ADMIN_ID:
+        keyboard.add(
+            InlineKeyboardButton("🛠️ Админ-панель", callback_data="start_admin"),
+            InlineKeyboardButton("📊 Проверить пользователя", callback_data="start_check"),
+            InlineKeyboardButton("📄 Логи пользователя", callback_data="start_log")
+        )
+    
+    return keyboard
+
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    """Обрабатывает команду /start"""
+    start_text = """🤖 Добро пожаловать в Anti-Spam Bot!
+
+📋 Перед началом работы:
+1. Добавьте бота в ваш чат
+2. Выдайте боту права администратора
+3. Убедитесь, что бот может:
+   - Удалять сообщения
+   - Банить пользователей
+   - Ограничивать права (мутить)
+
+📖 Правила модерации:
+
+🔇 Муты:
+• Спам сообщениями – 1 час
+• Спам стикерами – 1 час  
+• Оскорбления родни – 24 часа
+• Реклама – навсегда
+• Запрещенный контент – навсегда
+
+⚠️ Система предупреждений:
+• Варны выдаются по усмотрению администратора
+• 3 предупреждения = автоматический бан
+• Варны сгорают через 3 дня
+
+🆘 Замутили в чате по ошибке?
+@rilyglrletukdetuluft (14:00-2:00)
+
+Выберите действие:"""
+    
+    bot.send_message(
+        message.chat.id, 
+        start_text,
+        reply_markup=start_keyboard()
+    )
+
+# ОБРАБОТКА КНОПОК СТАРТА
+@bot.callback_query_handler(func=lambda call: call.data.startswith('start_'))
+def handle_start_actions(call):
+    """Обработка действий из стартового меню"""
+    if call.data == "start_profile":
+        # Команда профиля для всех
+        profile_command(call.message)
+    
+    elif call.data == "start_admin":
+        # Админ-панель только для админа
+        if not is_admin(call.from_user.id):
+            bot.answer_callback_query(call.id, "❌ Доступ запрещен!")
+            return
+        admin_command(call.message)
+    
+    elif call.data == "start_check":
+        # Проверка пользователя только для админа
+        if not is_admin(call.from_user.id):
+            bot.answer_callback_query(call.id, "❌ Доступ запрещен!")
+            return
+        msg = bot.send_message(call.message.chat.id, "Введите @username для проверки:")
+        bot.register_next_step_handler(msg, process_check_from_button)
+    
+    elif call.data == "start_log":
+        # Логи пользователя только для админа
+        if not is_admin(call.from_user.id):
+            bot.answer_callback_query(call.id, "❌ Доступ запрещен!")
+            return
+        msg = bot.send_message(call.message.chat.id, "Введите ID или @username для получения логов:")
+        bot.register_next_step_handler(msg, process_log_from_button)
+    
+    bot.answer_callback_query(call.id)
+
+def process_check_from_button(message):
+    """Обработка проверки пользователя из кнопки"""
+    try:
+        username = message.text.replace('@', '')
+        user_id = 123456789  # Замени на реальную логику
+        
+        restrictions = db.get_user_restrictions(user_id, message.chat.id)
+        active_restriction = db.get_active_restriction(user_id, message.chat.id)
+        message_count = db.get_user_stats(user_id, message.chat.id)
+        warn_count = db.get_active_warn_count(user_id, message.chat.id)
+        
+        response = f"🔍 Информация о пользователе @{username}\n\n"
+        
+        if active_restriction:
+            end_time = format_end_time(active_restriction[7])
+            start_time = active_restriction[6]
+            if isinstance(start_time, str):
+                start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
+            
+            response += f"📊 Статус: 🔇 Замучен\n"
+            response += f"📝 Причина: {active_restriction[4]}\n"
+            response += f"⏰ Начало: {start_time.strftime('%d.%m.%Y %H:%M')}\n"
+            response += f"🕒 Конец: {end_time}\n"
+        else:
+            response += f"📊 Статус: ✅ Активен\n"
+        
+        response += f"💬 Сообщений в чате: {message_count}\n"
+        response += f"⚠️ Предупреждений: {warn_count}/{MAX_WARNS}\n"
+        response += f"📋 Всего нарушений: {len(restrictions)}\n"
+        
+        bot.reply_to(message, response)
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка при проверке: {e}")
+
+def process_log_from_button(message):
+    """Обработка логов пользователя из кнопки"""
+    user_log_command(message)
 
 # Глобальные переменные для хранения данных
 admin_data = {}
 
-@bot.callback_query_handler(func=lambda call: True)
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
 def handle_admin_actions(call):
     """Обработка действий админ-панели"""
     if not is_admin(call.from_user.id):
@@ -702,42 +890,42 @@ def handle_admin_actions(call):
     if call.data == "admin_mute":
         msg = bot.send_message(
             call.message.chat.id,
-            "🔇 **Мут пользователя**\nВведите ID чата:"
+            "🔇 Мут пользователя\nВведите ID чата:"
         )
         bot.register_next_step_handler(msg, process_mute_chat)
         
     elif call.data == "admin_unmute":
         msg = bot.send_message(
             call.message.chat.id,
-            "🔊 **Размут пользователя**\nВведите ID чата:"
+            "🔊 Размут пользователя\nВведите ID чата:"
         )
         bot.register_next_step_handler(msg, process_unmute_chat)
         
     elif call.data == "admin_warn":
         msg = bot.send_message(
             call.message.chat.id,
-            "⚠️ **Выдать предупреждение**\nВведите ID чата:"
+            "⚠️ Выдать предупреждение\nВведите ID чата:"
         )
         bot.register_next_step_handler(msg, process_warn_chat)
         
     elif call.data == "admin_unwarn":
         msg = bot.send_message(
             call.message.chat.id,
-            "✅ **Снять предупреждение**\nВведите ID чата:"
+            "✅ Снять предупреждение\nВведите ID чата:"
         )
         bot.register_next_step_handler(msg, process_unwarn_chat)
         
     elif call.data == "admin_ban":
         msg = bot.send_message(
             call.message.chat.id,
-            "🔨 **Забанить пользователя**\nВведите ID чата:"
+            "🔨 Забанить пользователя\nВведите ID чата:"
         )
         bot.register_next_step_handler(msg, process_ban_chat)
         
     elif call.data == "admin_unban":
         msg = bot.send_message(
             call.message.chat.id,
-            "🔄 **Разбанить пользователя**\nВведите ID чата:"
+            "🔄 Разбанить пользователя\nВведите ID чата:"
         )
         bot.register_next_step_handler(msg, process_unban_chat)
     
@@ -750,7 +938,7 @@ def process_mute_chat(message):
         admin_data[message.from_user.id] = {'chat_id': chat_id, 'action': 'mute'}
         msg = bot.send_message(
             message.chat.id,
-            "🔇 **Мут пользователя**\nВведите ID пользователя и время в часах:\n`123456789 24 причина`"
+            "🔇 Мут пользователя\nВведите ID пользователя и время в часах:\n123456789 24 причина"
         )
         bot.register_next_step_handler(msg, process_mute_final)
     except ValueError:
@@ -763,7 +951,7 @@ def process_unmute_chat(message):
         admin_data[message.from_user.id] = {'chat_id': chat_id, 'action': 'unmute'}
         msg = bot.send_message(
             message.chat.id,
-            "🔊 **Размут пользователя**\nВведите ID пользователя:\n`123456789`"
+            "🔊 Размут пользователя\nВведите ID пользователя:\n123456789"
         )
         bot.register_next_step_handler(msg, process_unmute_final)
     except ValueError:
@@ -776,7 +964,7 @@ def process_warn_chat(message):
         admin_data[message.from_user.id] = {'chat_id': chat_id, 'action': 'warn'}
         msg = bot.send_message(
             message.chat.id,
-            "⚠️ **Выдать предупреждение**\nВведите ID пользователя и причину:\n`123456789 спам`"
+            "⚠️ Выдать предупреждение\nВведите ID пользователя и причину:\n123456789 спам"
         )
         bot.register_next_step_handler(msg, process_warn_final)
     except ValueError:
@@ -789,7 +977,7 @@ def process_unwarn_chat(message):
         admin_data[message.from_user.id] = {'chat_id': chat_id, 'action': 'unwarn'}
         msg = bot.send_message(
             message.chat.id,
-            "✅ **Снять предупреждение**\nВведите ID пользователя:\n`123456789`"
+            "✅ Снять предупреждение\nВведите ID пользователя:\n123456789"
         )
         bot.register_next_step_handler(msg, process_unwarn_final)
     except ValueError:
@@ -802,7 +990,7 @@ def process_ban_chat(message):
         admin_data[message.from_user.id] = {'chat_id': chat_id, 'action': 'ban'}
         msg = bot.send_message(
             message.chat.id,
-            "🔨 **Забанить пользователя**\nВведите ID пользователя и причину:\n`123456789 спам`"
+            "🔨 Забанить пользователя\nВведите ID пользователя и причину:\n123456789 спам"
         )
         bot.register_next_step_handler(msg, process_ban_final)
     except ValueError:
@@ -815,7 +1003,7 @@ def process_unban_chat(message):
         admin_data[message.from_user.id] = {'chat_id': chat_id, 'action': 'unban'}
         msg = bot.send_message(
             message.chat.id,
-            "🔄 **Разбанить пользователя**\nВведите ID пользователя:\n`123456789`"
+            "🔄 Разбанить пользователя\nВведите ID пользователя:\n123456789"
         )
         bot.register_next_step_handler(msg, process_unban_final)
     except ValueError:
@@ -1016,41 +1204,13 @@ def process_unban_final(message):
         bot.reply_to(message, f"❌ Ошибка: {e}")
 
 # Обработчики команд
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    """Обрабатывает команду /start"""
-    start_text = """🤖 **Добро пожаловать в Anti-Spam Bot!**
-
-📋 **Перед началом работы:**
-1. Добавьте бота в ваш чат
-2. Выдайте боту права администратора
-3. Убедитесь, что бот может:
-   - Удалять сообщения
-   - Банить пользователей
-   - Ограничивать права (мутить)
-
-📖 **Правила модерации:**
-
-🔇 Муты:
-• Спам сообщениями – 1 час
-• Спам стикерами – 1 час  
-• Оскорбления родни – 24 часа
-• Реклама – навсегда
-• Запрещенный контент – навсегда
-
-⚠️ Предупреждения:
-• 3 предупреждения = автоматический бан
-
-🆘 Замутили в чате по ошибке?
-@rilyglrletukdetuluft (14:00-2:00)
-
-⚙️ Админ-панель: /admin"""
-    
-    bot.reply_to(message, start_text)
-
 @bot.message_handler(commands=['check'])
 def check_command(message):
     """Команда /check для проверки пользователя"""
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, "❌ Доступ запрещен!")
+        return
+    
     if not message.text or len(message.text.split()) < 2:
         bot.reply_to(message, "❌ Использование: /check @username")
         return
@@ -1064,9 +1224,9 @@ def check_command(message):
         restrictions = db.get_user_restrictions(user_id, message.chat.id)
         active_restriction = db.get_active_restriction(user_id, message.chat.id)
         message_count = db.get_user_stats(user_id, message.chat.id)
-        warn_count = db.get_warn_count(user_id, message.chat.id)
+        warn_count = db.get_active_warn_count(user_id, message.chat.id)
         
-        response = f"🔍 **Информация о пользователе** @{username}\n\n"
+        response = f"🔍 Информация о пользователе @{username}\n\n"
         
         if active_restriction:
             end_time = format_end_time(active_restriction[7])
@@ -1158,7 +1318,8 @@ if __name__ == '__main__':
     print("🔧 Токен: 8207041880:AAEM1F0YaWF3jEKJ-GfRPPOosOBbpTnSY4M")
     print("👑 Админ ID: 8054980148")
     print("🛠️ Админ-панель: /admin")
+    print("👤 Команда /profile - статистика пользователя")
     print("📄 Команда /log ID/@username - получить лог нарушений пользователя")
-    print("⚠️ Система предупреждений: 3 варна = бан")
+    print("⚠️ Система предупреждений: 3 варна = бан (сгорают через 3 дня)")
     print("🔍 Команда /check работает!")
     bot.infinity_polling()
