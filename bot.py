@@ -345,23 +345,14 @@ def is_admin(user_id):
     return user_id == ADMIN_ID
 
 def check_consecutive_identical(user_id, message_text):
-    """Проверяет одинаковые сообщения подряд"""
+    """Проверяет одинаковые сообщения"""
     history = user_message_history[user_id]
     
-    # Добавляем текущее сообщение
+    if history and all(msg == message_text for msg in list(history)[-MAX_CONSECUTIVE_IDENTICAL+1:]):
+        history.append(message_text)
+        return len(history) == MAX_CONSECUTIVE_IDENTICAL and all(msg == message_text for msg in history)
+    
     history.append(message_text)
-    
-    # Проверяем только если в истории достаточно сообщений
-    if len(history) < MAX_CONSECUTIVE_IDENTICAL:
-        return False
-    
-    # Проверяем, что все последние 5 сообщений одинаковые
-    last_messages = list(history)[-MAX_CONSECUTIVE_IDENTICAL:]
-    first_msg = last_messages[0]
-    
-    if all(msg == first_msg for msg in last_messages):
-        return True
-    
     return False
 
 def check_repeated_patterns(message_text):
