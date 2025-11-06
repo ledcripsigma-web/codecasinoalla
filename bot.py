@@ -11,6 +11,7 @@ from telebot.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardB
 import io
 import requests
 import time
+import os
 
 # Создаем Flask сервер для Render
 app = Flask(__name__)
@@ -19,24 +20,34 @@ app = Flask(__name__)
 def home():
     return "🤖 Бот работает! Telegram: @ledcripsigma_bot"
 
+@app.route('/ping')
+def ping():
+    return "pong"
+
 def run_web():
-    app.run(host='0.0.0.0', port=10000, debug=False)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), debug=False)
 
-# Запускаем веб-сервер в отдельном потоке
-threading.Thread(target=run_web, daemon=True).start()
-
-# 🔥 АВТОПИНГ ДЛЯ RENDER - БОТ НЕ УСНЕТ
+# 🔥 ИСПРАВЛЕННЫЙ АВТОПИНГ ДЛЯ RENDER
 def keep_awake():
+    """Автопинг для поддержания активности на Render"""
+    # URL вашего приложения на Render
+    web_url = 'https://codecasinoalla-1.onrender.com/'
+    
     while True:
-        time.sleep(240)  # 4 минуты
         try:
-            requests.get('https://codecasinoalla-1.onrender.com/')
-            print("🔄 Автопинг - бот активен")
+            response = requests.get(web_url, timeout=10)
+            print(f"🔄 Автопинг успешен - статус: {response.status_code}")
         except Exception as e:
             print(f"❌ Ошибка автопинга: {e}")
-
-# Запускаем автопинг в отдельном потоке
-threading.Thread(target=keep_awake, daemon=True).start()
+            # Пробуем альтернативный URL
+            try:
+                response = requests.get(web_url + 'ping', timeout=10)
+                print(f"🔄 Автопинг через /ping - статус: {response.status_code}")
+            except Exception as e2:
+                print(f"❌ Ошибка автопинга /ping: {e2}")
+        
+        # Ждем 5 минут перед следующим пингом
+        time.sleep(300)
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -1450,4 +1461,20 @@ if __name__ == '__main__':
     print("🔍 Команда /check работает!")
     print("🆕 Обнаружение спама: повторяющиеся паттерны в одном сообщении")
     print("🗑️ Новая функция: удаление сообщений по ссылке в админ-панели")
-    bot.infinity_polling()
+    
+    # Запускаем Flask сервер в отдельном потоке
+    web_thread = threading.Thread(target=run_web, daemon=True)
+    web_thread.start()
+    print("🌐 Flask сервер запущен в отдельном потоке")
+    
+    # Запускаем автопинг в отдельном потоке
+    ping_thread = threading.Thread(target=keep_awake, daemon=True)
+    ping_thread.start()
+    print("🔄 Автопинг запущен в отдельном потоке")
+    
+    # Запускаем бота
+    try:
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    except Exception as e:
+        logger.error(f"Ошибка при запуске бота: {e}")
+        print(f"❌ Ошибка бота: {e}")
